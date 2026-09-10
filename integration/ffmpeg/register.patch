@@ -1,0 +1,26 @@
+Register the MQA unfold filter in an FFmpeg tree.
+
+Copy af_mqa.c and the adapter into libavfilter/ first:
+
+    cp integration/ffmpeg/af_mqa.c ffmpeg/libavfilter/
+    cp integration/common/mqa_adapter.[ch] ffmpeg/libavfilter/
+    cd ffmpeg && patch -p1 < integration/ffmpeg/register.patch
+
+then configure with the library:
+
+    ./configure --extra-cflags=-I/path/to/mqa-decode/include \
+                --extra-ldflags=-L/path/to/mqa-decode --extra-libs=-lmqadecode
+
+configure finds the filter in allfilters.c by itself; there is nothing
+else to add. Applied against FFmpeg 7.1, where it was built and run.
+
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@
++extern const AVFilter ff_af_mqa;
+ extern const AVFilter ff_af_pan;
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@
++OBJS-$(CONFIG_MQA_FILTER)                    += af_mqa.o mqa_adapter.o
+ OBJS-$(CONFIG_PAN_FILTER)                    += af_pan.o
