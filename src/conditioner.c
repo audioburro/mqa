@@ -6,6 +6,7 @@
  */
 #include <string.h>
 #include "mqa/conditioner.h"
+#include "mqa/lcg.h"
 
 #define TAPS MQA_CONDITIONER_TAPS
 
@@ -133,6 +134,20 @@ void mqa_conditioner_configure(struct mqa_conditioner *c, unsigned rate_code, un
 	c->seed2 = dither_mode == 1 ? 0xf807b7dfu : 0xd5c31f79u;
 	seed_noise(c->lcg2, c->seed2, 0);
 	c->steady = 1;
+}
+
+void mqa_conditioner_seek(struct mqa_conditioner *c, uint32_t position)
+{
+	unsigned k;
+
+	c->count1 = c->count2 = position;
+	c->steady = 0;
+	seed_noise(c->lcg1, 0xe7e1faeeu, position >> 12);
+	seed_noise(c->lcg2, c->seed2, position >> 12);
+	for (k = 0; k < 2; k++) {
+		c->lcg1[k] = mqa_lcg_jump(c->lcg1[k], position & 0xfff);
+		c->lcg2[k] = mqa_lcg_jump(c->lcg2[k], position & 0xfff);
+	}
 }
 
 void mqa_conditioner_set_marker(struct mqa_conditioner *c, uint32_t at, const uint32_t *words, unsigned n)

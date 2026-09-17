@@ -16,7 +16,8 @@
  *      before it can push anything, so it must ask (mqa_adapter_state)
  *      before it answers. In DECODING the adapter guarantees two output
  *      frames per input frame, which keeps a filter's timestamps
- *      trivial; in PLAIN it is one for one.
+ *      trivial; in PLAIN it is one for one. With the second unfold on
+ *      (mqa_adapter_set_render) it is four or eight per frame.
  *
  *   3. *The decoder passes some frames through.* The run-in before a
  *      stream opens, and anything after one ends, comes back unfolded --
@@ -51,11 +52,17 @@ enum mqa_adapter_passthrough {
 	MQA_ADAPTER_RAW         /* emit them once, as the reference does     */
 };
 
+/* mqa_adapter_set_render's ratio: to the original rate, once known */
+#define MQA_ADAPTER_RENDER_ORIGINAL 1
+
 struct mqa_adapter {
 	struct mqa_stream_decoder sd;
 	enum mqa_adapter_state state;
 	enum mqa_adapter_passthrough policy;
 	unsigned rate_hz;
+	unsigned render;               /* asked for: 0 off, 1 original, 2, 4 */
+	unsigned render_ratio;         /* in force: 1, 2 or 4                */
+	int requantise;
 	unsigned sniff_frames;         /* input frames to wait for a stream  */
 	unsigned long fed;             /* input frames given to the decoder  */
 	unsigned long passed_seen;     /* passed-through frames accounted for */
@@ -87,6 +94,15 @@ void mqa_adapter_set_signalling(struct mqa_adapter *a, int on);
 
 /* What to do with frames the decoder passes through. */
 void mqa_adapter_set_passthrough(struct mqa_adapter *a, enum mqa_adapter_passthrough p);
+
+/*
+ * The second unfold as well: `ratio` is 0 for off, 2 or 4 for a fixed
+ * ratio on top of the doubling, or MQA_ADAPTER_RENDER_ORIGINAL for
+ * whatever ratio reaches the stream's original rate (2 or 4; 1 when the
+ * first unfold already reaches it). With `requantise` the rendered
+ * output is requantised as a renderer's would be. Call before pushing.
+ */
+void mqa_adapter_set_render(struct mqa_adapter *a, unsigned ratio, int requantise);
 
 /* Give it `n` interleaved stereo frames. Returns 0, or -1 on failure. */
 int mqa_adapter_push(struct mqa_adapter *a, const int32_t *frames, size_t n);
@@ -123,7 +139,8 @@ void mqa_adapter_force(struct mqa_adapter *a, enum mqa_adapter_state state);
 
 /*
  * The output rate the state implies, in Hz: twice the carrier's while
- * decoding, the carrier's own otherwise. Meaningless while sniffing.
+ * decoding (times the render ratio in force), the carrier's own
+ * otherwise. Meaningless while sniffing.
  */
 unsigned mqa_adapter_output_rate(const struct mqa_adapter *a);
 

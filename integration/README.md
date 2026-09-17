@@ -66,13 +66,20 @@ GST_PLUGIN_PATH=$PWD gst-launch-1.0 filesrc location=track.flac ! flacparse ! fl
 GStreamer scans without being told.
 
 The element accepts S16LE, S24_32LE and S32LE stereo at 44.1 or 48 kHz
-and emits S32LE at the doubled rate. It does not negotiate its output
+and emits S32LE at the doubled rate, or with `unfolds=2` at the
+stream's original rate (four or eight times the carrier's). It does not negotiate its output
 caps until it has sniffed the carrier, so a file that is not MQA comes
 out unchanged at its own rate, which is what you want from an
 element sitting in a general playback pipeline.
 
 Properties: `signalling` (embed the renderer signalling, off by default),
-`passthrough` (`hold`, `drop` or `raw`), `sniff-time` in ms.
+`passthrough` (`hold`, `drop` or `raw`), `sniff-time` in ms, `unfolds`
+(1 or 2), `render-ratio` (with two unfolds: 0 for the original rate, or
+a fixed 2 or 4) and `requantise` (with two unfolds: requantise as an
+MQA renderer does, off by default). The VLC and FFmpeg filters take the
+same three as `unfolds`, `render-ratio`/`ratio` and `requantise`, but
+they must name their output rate before seeing the stream, so their
+ratio is fixed at 2 unless set.
 
 ### mqaenc, the other direction
 

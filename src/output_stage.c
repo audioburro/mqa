@@ -305,8 +305,15 @@ int mqa_output_stage_group(struct mqa_output_stage *s,
 		unsigned drop = s->skip < n ? s->skip : n;
 
 		/* the skipped taps still go through the filter */
-		if (s->kernel)
+		if (s->kernel) {
 			mqa_recon2_prime(&s->recon2, a, b, p, q, drop);
+			/* at a stream's very start (output position zero) the
+			 * reference then clears what the warm-up left in the
+			 * output and residue histories; a stream joined part way
+			 * through keeps them */
+			if (s->skip == drop && s->dither.counter == 0)
+				mqa_recon2_settle(&s->recon2);
+		}
 		s->skip = (uint8_t)(s->skip - drop);
 		a += drop;
 		b += drop;

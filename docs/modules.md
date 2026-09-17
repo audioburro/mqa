@@ -24,6 +24,7 @@ how the code is arranged.
 | `resampler.h` | the passthrough's rate-status machine (resampling itself is not implemented) | 9.5 |
 | `conditioner.h` | the requantisation and signalling the intake applies to the carrier | 10 |
 | `watermark.h` | the renderer signalling carried in the parity of output frames | 11 |
+| `render.h` | the second unfold: the renderer's interpolator, dither and requantiser | 13 |
 | `lsb_correction.h`, `crc24.h` | the final per-sample +-1 correction | A.9 |
 | `crc32.h`, `lcg.h` | the CRC-32 and the two generators used throughout | 9.4, A.5 |
 | `decoder.h` | the per-group orchestration of everything above | 3 |

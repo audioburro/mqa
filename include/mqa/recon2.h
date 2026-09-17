@@ -65,6 +65,13 @@ void mqa_recon2_init(struct mqa_recon2_state *st, unsigned shape);
  *
  * The sign is not advanced: only taps that produce output flip it.
  */
+/*
+ * The end of the eight-tap skip at a stream's start: the warm-up's second
+ * outputs and residues are cleared before the first tap that produces
+ * output, so the filter starts from the carrier history alone.
+ */
+void mqa_recon2_settle(struct mqa_recon2_state *st);
+
 void mqa_recon2_prime(struct mqa_recon2_state *st,
 		      const int32_t *a, const int32_t *b,
 		      const int32_t *p, const int32_t *q, unsigned n);

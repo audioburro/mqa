@@ -22,6 +22,14 @@ void mqa_stream_decoder_init(struct mqa_stream_decoder *sd, unsigned rate_hz)
 	mqa_decoder_init(&sd->dec, &mqa_carrier_classes[0]);
 	mqa_intake_init(&sd->in, rate_hz);
 	mqa_decoder_set_input_rate(&sd->dec, mqa_intake_rate_code(rate_hz));
+	sd->render_ratio = 1;
+}
+
+void mqa_stream_decoder_set_render(struct mqa_stream_decoder *sd, unsigned ratio, int requantise)
+{
+	sd->render_ratio = ratio == 2 || ratio == 4 ? ratio : 1;
+	mqa_render_init(&sd->render, sd->render_ratio);
+	mqa_render_set_requantise(&sd->render, requantise);
 }
 
 void mqa_stream_decoder_set_signalling(struct mqa_stream_decoder *sd, int on)
@@ -128,7 +136,7 @@ size_t mqa_stream_decoder_run(struct mqa_stream_decoder *sd, int32_t *out, size_
 		if (!sd->finishing && avail < MQA_GROUP + MQA_INTAKE_LOOKAHEAD + MQA_GROUP)
 			break;
 
-		if (written + MQA_STREAM_DECODER_GROUP_MAX > capacity)
+		if (written + sd->render_ratio * MQA_STREAM_DECODER_GROUP_MAX > capacity)
 			break;
 		if (avail > 0) {
 			/* the intake reads the slot and 512 frames on: give it a
@@ -196,11 +204,31 @@ size_t mqa_stream_decoder_run(struct mqa_stream_decoder *sd, int32_t *out, size_
 		}
 		if (sd->after_group)
 			sd->after_group(sd->user, sd, sd->out_l, sd->out_r, produced);
-		for (n = 0; n < produced; n++) {
-			out[2 * (written + n)] = (int32_t)((uint32_t)sd->out_l[n] << 8);
-			out[2 * (written + n) + 1] = (int32_t)((uint32_t)sd->out_r[n] << 8);
+		if (sd->render_ratio > 1) {
+			/* the second unfold, told the stream's parameters directly,
+			 * a few frames at a time to keep the buffers small */
+			unsigned done = 0, ratio = sd->render_ratio;
+
+			mqa_render_set_stream(&sd->render, sd->in.active, sd->in.render_filter);
+			while (done < produced) {
+				int32_t l[4 * 64], r[4 * 64];
+				unsigned k = produced - done < 64 ? produced - done : 64;
+
+				mqa_render_run(&sd->render, sd->out_l + done, sd->out_r + done, k, l, r);
+				for (n = 0; n < k * ratio; n++) {
+					out[2 * written] = (int32_t)((uint32_t)l[n] << 8);
+					out[2 * written + 1] = (int32_t)((uint32_t)r[n] << 8);
+					written++;
+				}
+				done += k;
+			}
+		} else {
+			for (n = 0; n < produced; n++) {
+				out[2 * (written + n)] = (int32_t)((uint32_t)sd->out_l[n] << 8);
+				out[2 * (written + n) + 1] = (int32_t)((uint32_t)sd->out_r[n] << 8);
+			}
+			written += produced;
 		}
-		written += produced;
 		if (step && sd->in.pkt.count == 0 && rc == 0)
 			break;
 		if (rc == 0 && !sd->finishing)

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <string.h>
+#include <string.h>
 #include "mqa/recon2.h"
 #include "mqa/reconstruct.h"
 
@@ -89,6 +90,16 @@ void mqa_recon2_prime(struct mqa_recon2_state *st,
 	for (i = 0; i < n; i++) {
 		prime_channel(&st->ch[0], a[i], p ? p[i] : 0, p == NULL);
 		prime_channel(&st->ch[1], b[i], q ? q[i] : 0, p == NULL);
+	}
+}
+
+void mqa_recon2_settle(struct mqa_recon2_state *st)
+{
+	unsigned c;
+
+	for (c = 0; c < 2; c++) {
+		memset(st->ch[c].y, 0, sizeof st->ch[c].y);
+		memset(st->ch[c].z, 0, sizeof st->ch[c].z);
 	}
 }
 

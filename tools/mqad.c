@@ -28,6 +28,7 @@
 #include <errno.h>
 #include "audio_io.h"
 #include "mqa/bitstream.h"
+#include "mqa/resampler.h"
 #include "mqa/stream_decoder.h"
 
 /* --- describing a stream ------------------------------------------------- */
@@ -554,7 +555,8 @@ static int cmd_decode(int argc, char **argv)
 {
 	const char *in = NULL, *out = NULL, *layer = NULL, *extra = NULL;
 	enum audio_format fmt;
-	int i, quiet = 0, verbose = 0, signalling = 0;
+	int i, quiet = 0, verbose = 0, signalling = 0, unfolds = 1, requantise = 0;
+	unsigned ratio = 1, orig_hz = 0;
 
 	for (i = 0; i < argc; i++) {
 		if (!strcmp(argv[i], "-q"))
@@ -569,13 +571,17 @@ static int cmd_decode(int argc, char **argv)
 			extra = argv[++i];
 		else if (!strcmp(argv[i], "-s"))
 			signalling = 1;
+		else if (!strcmp(argv[i], "-u") && i + 1 < argc)
+			unfolds = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "-R"))
+			requantise = 1;
 		else if (!in)
 			in = argv[i];
 		else
 			out = argv[i];
 	}
-	if (!in || !out) {
-		fprintf(stderr, "usage: mqad decode [-q] [-p] [-v] [-s] [-r LAYER.wav] [-x EXTRA.wav] IN OUT\n");
+	if (!in || !out || (unfolds != 1 && unfolds != 2)) {
+		fprintf(stderr, "usage: mqad decode [-q] [-p] [-v] [-s] [-u 1|2] [-R] [-r LAYER.wav] [-x EXTRA.wav] IN OUT\n");
 		return 2;
 	}
 	fmt = audio_format_of(out);
@@ -596,8 +602,31 @@ static int cmd_decode(int argc, char **argv)
 		return 1;
 	}
 	if (dec_in.rate != 48000 && dec_in.rate != 44100)
-		fprintf(stderr, "%s: %u Hz input; the decoder has only been verified on 48 kHz material\n", in, dec_in.rate);
-	if (audio_create(&dec_out, out, fmt, 2, 2 * dec_in.rate, 24, &dec_in.meta, 2 * dec_in.frames) < 0) {
+		fprintf(stderr, "%s: %u Hz input; the decoder has only been verified on 44.1 and 48 kHz material\n", in, dec_in.rate);
+	if (unfolds == 2) {
+		/* the second unfold goes to the original rate, which the
+		 * opening datasync names: find it before the output is made */
+		struct stream_info si;
+		struct audio_reader rd;
+		unsigned code;
+
+		memset(&si, 0, sizeof si);
+		if (scan_stream(in, &si, (uint64_t)dec_in.rate * 60, &rd) == 0)
+			audio_close(&rd);
+		if (si.found) {
+			code = si.first.orig_rate & 31;
+			if (code <= 23)
+				orig_hz = (unsigned)mqa_rate_code_base[code >> 3] << (code & 7);
+		}
+		if (orig_hz >= 8 * dec_in.rate)
+			ratio = 4;
+		else if (orig_hz >= 4 * dec_in.rate)
+			ratio = 2;
+		if (ratio == 1 && !quiet)
+			fprintf(stderr, "%s: %s; the first unfold is all there is to do\n", in,
+				si.found ? "the original rate is the unfolded rate" : "no MQA stream found");
+	}
+	if (audio_create(&dec_out, out, fmt, 2, 2 * dec_in.rate * ratio, 24, &dec_in.meta, 2 * dec_in.frames * ratio) < 0) {
 		fprintf(stderr, "%s: cannot create (%s)\n", out, strerror(errno));
 		audio_close(&dec_in);
 		return 1;
@@ -630,6 +659,12 @@ static int cmd_decode(int argc, char **argv)
 	mqa_stream_decoder_init(&dec_sd, dec_in.rate);
 	if (signalling)
 		mqa_stream_decoder_set_signalling(&dec_sd, 1);
+	if (ratio > 1) {
+		mqa_stream_decoder_set_render(&dec_sd, ratio, requantise);
+		if (verbose)
+			printf("render: to %u Hz (the original rate), %s\n", 2 * dec_in.rate * ratio,
+			       requantise ? "requantised as a renderer would" : "at full precision");
+	}
 	if (layer_on || extra_on) {
 		dec_sd.dec.on_layer = on_layer;
 		dec_sd.before_group = before_group;
@@ -718,6 +753,8 @@ static int usage(void)
 		"       mqad stats [-f] PATH...       summarise the MQA content found\n"
 		"       mqad info [-v|-q] [-m FILE] FILE   describe a file's MQA stream (-m: save stream metadata)\n"
 		"       mqad decode [-q] [-p] [-v] IN OUT   decode (first unfold) to OUT (.flac/.wav/.raw)\n"
+		"                                     -u 2: the second unfold too, to the original rate\n"
+		"                                     -R: requantise the rendered output as a renderer does\n"
 		"                                     -p: progress, -v: show formats and the stream\n"
 		"                                     -r LAYER.wav: write the encoded residual layer (P, Q) at the input rate\n"
 		"                                     -x EXTRA.wav: write what the hidden data adds to the output, at the output rate\n");

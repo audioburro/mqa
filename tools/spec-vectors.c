@@ -27,6 +27,7 @@
 #include "mqa/reconstruct.h"
 #include "mqa/recon2.h"
 #include "mqa/residual_stage.h"
+#include "mqa/render.h"
 #include "mqa/watermark.h"
 
 static const struct mqa_gain_params GAIN = { 203, (int32_t)0x50b59897, 7 };
@@ -364,6 +365,48 @@ static void vec_watermark(void)
 	end();
 }
 
+static void vec_render(void)
+{
+	static const int32_t in_l[48] = {
+		44490, 240000, 315020, 198940, -81184, -247707, -236524, -104085,
+		125563, 278281, 8388607, -8388608, -194432, -343865, -148154, 133378,
+		243295, 293709, 25964, -183694, -267729, -229534, 9949, 221303,
+		313582, 112258, -64267, -290001, -259815, -50933, 198883, 305279,
+		201363, 10925, -113329, -140205, -201286, -85211, 41727, 160217,
+		272005, 251612, 69173, -175908, -286934, -219906, -19560, 138902,
+	};
+	static const int32_t in_r[48] = {
+		-255525, -129520, 158925, 214042, -6457, -251485, -80590, 215749,
+		259462, -10145, -8388608, 8388607, 127285, 237922, -4364, -258367,
+		-113329, 76179, 205462, 7587, -173352, -165549, 135630, 219585,
+		90512, -217096, -205148, 18788, 261279, 130450, -168384, -254807,
+		41727, 22, 5000, -110000, 220000, -3300, 44000, -55000,
+		66000, -7700, 88000, -9900, 101000, -12000, 130000, -14000,
+	};
+	struct mqa_render r;
+	int32_t ol[4 * 48], orr[4 * 48];
+	unsigned ratio, signalled;
+
+	begin("render.txt", "The second unfold (spec 13)");
+	row("input_l", in_l, 48, 0);
+	row("input_r", in_r, 48, 0);
+	for (ratio = 2; ratio <= 4; ratio *= 2) {
+		for (signalled = 0; signalled < 2; signalled++) {
+			char name[32];
+
+			mqa_render_init(&r, ratio);
+			mqa_render_set_requantise(&r, 1);
+			mqa_render_set_stream(&r, (int)signalled, 8);
+			mqa_render_run(&r, in_l, in_r, 48, ol, orr);
+			snprintf(name, sizeof name, "%s_x%u_l", signalled ? "stream8" : "plain", ratio);
+			row(name, ol, 48 * ratio, 0);
+			snprintf(name, sizeof name, "%s_x%u_r", signalled ? "stream8" : "plain", ratio);
+			row(name, orr, 48 * ratio, 0);
+		}
+	}
+	end();
+}
+
 int main(int argc, char **argv)
 {
 	const char *dir;
@@ -385,6 +428,7 @@ int main(int argc, char **argv)
 	vec_reconstruct();
 	vec_recon2();
 	vec_watermark();
+	vec_render();
 	if (checking)
 		printf("spec vectors: %s\n", failures ? "MISMATCHES" : "all match");
 	else

@@ -27,6 +27,8 @@
  */
 static const uint32_t default_level_record[4] = { 0, 0, 20 << 8, 0x1555 };
 
+static void join_at(struct mqa_intake *in, uint32_t position);
+
 static void apply_item0(struct mqa_intake *in, const struct mqa_bs_packet *p, const struct mqa_bs_item *it)
 {
 	const struct mqa_bs_datasync *d = &p->u.datasync;
@@ -51,15 +53,20 @@ static void apply_item0(struct mqa_intake *in, const struct mqa_bs_packet *p, co
 	}
 	in->pkt.alt_mode = 0;
 	in->pkt.level = u5 << 8;
-	if (!d->stream_pos_flag) {
-		/* the stream's opening datasync: its parameters apply at once,
-		 * and the conditioner is set up from them */
+	if (!d->stream_pos_flag || in->pkt.fresh) {
+		/* the stream's opening datasync, or the resync a stream is
+		 * joined at: its parameters apply at once, and the conditioner
+		 * is set up from them, counting from the stream's position */
 		uint32_t gain2 = mqa_conditioner_gain_index(it->u.base.gain_index) >> (7 - xbit);
 
 		if (gain2 == 0)
 			gain2 = 256u << xbit;
 		mqa_conditioner_configure(&in->cond, d->src_rate, it->u.base.stage2_dither, xbit,
 					  (int32_t)gain2, in->level_record);
+		if (d->stream_pos_flag)
+			join_at(in, in->stream_pos);
+	}
+	if (!d->stream_pos_flag) {
 		in->pkt.sync = 0;
 		if (!in->decode_disabled) {
 			in->first_sync = 1;
@@ -76,18 +83,25 @@ static void apply_item0(struct mqa_intake *in, const struct mqa_bs_packet *p, co
 		in->pending_sync = (int32_t)at;
 		in->pending_sync_at = in->stream_pos;
 		/* the resync marker: the item's bits beyond its 48 bits of
-		 * fields, whole words */
+		 * fields, whole words, and zeros past the item's end (the
+		 * reference has copied only the item's own bits when it reads
+		 * them; what follows in the packet is not there yet) */
 		if (it->size >= 48)
 			words = ((it->size - 48) >> 5) + 1;
 		if (from + 32 * words <= 32 * MQA_BS_RAW_WORDS) {
 			uint32_t table[MQA_CONDITIONER_MARKER_WORDS];
-			unsigned i;
+			unsigned i, nbits = it->size > 48 ? it->size - 48 : 0;
 
 			for (i = 0; i < words && i < MQA_CONDITIONER_MARKER_WORDS; i++) {
 				unsigned bit = from + 32 * i;
 				uint64_t w = (uint64_t)p->raw[bit / 32] | (uint64_t)(bit / 32 + 1 < MQA_BS_RAW_WORDS ? p->raw[bit / 32 + 1] : 0) << 32;
+				uint32_t word = (uint32_t)(w >> (bit % 32));
 
-				table[i] = (uint32_t)(w >> (bit % 32));
+				if (32 * i >= nbits)
+					word = 0;
+				else if (nbits - 32 * i < 32)
+					word &= (1u << (nbits - 32 * i)) - 1;
+				table[i] = word;
 			}
 			mqa_conditioner_set_marker(&in->cond, at, table, i);
 		}
@@ -146,8 +160,16 @@ static void apply_datasync_header(struct mqa_intake *in, const struct mqa_bs_dat
 	in->render_bitdepth = d->render_bitdepth;
 	in->auth_level = d->auth_level;
 	in->auth_info = d->auth_info;
-	if (in->pkt.fresh)
+	if (in->pkt.fresh) {
 		in->auth_byte = (d->auth_info | d->auth_level << 4) & 0xff;
+		/* a stream joined at a resync counts from the position the
+		 * datasync announces, not from the frame it was found at, and
+		 * so does its conditioner */
+		if (d->stream_pos_flag) {
+			in->stream_pos = d->stream_position;
+			in->joined = 1;
+		}
+	}
 	in->pkt.format_field = d->orig_rate;
 	in->pkt.descriptor = (uint16_t)((d->render_filter | d->unknown_1 << 5 | d->render_bitdepth << 7) & 0x3ff);
 	in->ds_flag = d->unknown_2 & 1;
@@ -241,16 +263,14 @@ static void extract(struct mqa_intake *in, const int32_t *a, const int32_t *b, u
 	}
 	in->extracted += n;
 	mqa_bitstream_feed(&in->bs, a, b, n);
-	/* the payload bits now extracted, in stream order, while the stream
-	 * has synced (the reference's condition at the time it appends) */
+	/* the payload bits now extracted, in stream order */
 	while (in->nspans) {
 		uint64_t lim = in->span[0].end < in->extracted ? in->span[0].end : in->extracted;
 
 		while (in->span[0].next < lim) {
 			unsigned at = (unsigned)in->span[0].next % MQA_BITRING_BITS;
 
-			if (in->synced_once)
-				mqa_bitring_append(&in->ring, (in->channel[at / 32] >> (at % 32)) & 1u);
+			mqa_bitring_append(&in->ring, (in->channel[at / 32] >> (at % 32)) & 1u);
 			in->span[0].next++;
 		}
 		if (in->span[0].next < in->span[0].end)
@@ -306,6 +326,14 @@ static uint32_t auth_indicator(struct mqa_intake *in, uint32_t at, int claim)
 
 /* --- the stream start -------------------------------------------------------- */
 
+/* The stream is joined at `position`: what counts from the stream's
+ * start is rebased on it. */
+static void join_at(struct mqa_intake *in, uint32_t position)
+{
+	mqa_conditioner_seek(&in->cond, position);
+	in->joined_at = position;
+}
+
 static void stream_start(struct mqa_intake *in)
 {
 	struct mqa_packet *p = &in->pkt;
@@ -333,6 +361,7 @@ static void stream_start(struct mqa_intake *in)
 	in->no_decode = 0;
 	in->decode_disabled = 1;
 	in->have_params = 0;
+	in->joined = 0;
 	p->salt_select = 1;
 	p->variant = 0;
 	in->crc = 0;
@@ -406,6 +435,26 @@ static int started_group(struct mqa_intake *in, int32_t *a, int32_t *b, unsigned
 	count = available < FRAMES_PER_GROUP ? available : FRAMES_PER_GROUP;
 	if (in->end_pos <= in->stream_pos + count)
 		count = in->end_pos - in->stream_pos;
+	if (p->fresh && (in->stream_pos & 31)) {
+		/* joined between groups: the frames up to the next group
+		 * boundary of the stream's own count pass through first, and
+		 * the stream starts fresh at the boundary. The bitstream still
+		 * runs ahead over them. */
+		unsigned align = 32 - (in->stream_pos & 31);
+
+		p->count = available < align ? available : align;
+		if (available < p->count + MQA_INTAKE_LOOKAHEAD) {
+			p->count = 0;
+			return 0;
+		}
+		extract(in, a + MQA_INTAKE_LOOKAHEAD, b + MQA_INTAKE_LOOKAHEAD, p->count);
+		p->present = 0;
+		p->sync = 0;
+		p->length = 0;
+		in->stream_pos += p->count;
+		join_at(in, in->stream_pos);
+		return 1;
+	}
 	p->sync = -1;
 	if (in->end_pos > in->stream_pos + count)
 		count &= ~31u;
@@ -457,9 +506,13 @@ static int started_group(struct mqa_intake *in, int32_t *a, int32_t *b, unsigned
 	in->stream_pos += count;
 	if ((in->stream_pos & (MQA_INTAKE_AUTH_BLOCK - 1)) == 0 && in->end_pos - in->stream_pos >= MQA_INTAKE_AUTH_BLOCK) {
 		/* a block is complete: its checksum goes to the authentication,
-		 * which the library takes as passing (see intake.h) */
+		 * which the library takes as passing (see intake.h). A block a
+		 * joined stream only saw part of authenticates nothing. */
 		in->crc = 0;
-		in->until_end = MQA_INTAKE_AUTH_WINDOW;
+		if (!in->joined || in->stream_pos - in->joined_at >= MQA_INTAKE_AUTH_BLOCK)
+			in->until_end = MQA_INTAKE_AUTH_WINDOW;
+		else if (in->auth_pending)
+			in->auth_pending--;
 	}
 	in->just_started = 0;
 	p->length = in->end_pos;

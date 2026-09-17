@@ -13,7 +13,8 @@
  *   mqa_stream_decoder_finish(&sd) ... run/collect until it returns 0
  *
  * Frames are stereo, interleaved, 32-bit words with the 24-bit sample in
- * the top bits; output comes at twice the rate in the same form.
+ * the top bits; output comes at twice the rate in the same form, or at
+ * four or eight times it with the second unfold (render.h) turned on.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -22,10 +23,13 @@
 
 #include "mqa/decoder.h"
 #include "mqa/intake.h"
+#include "mqa/render.h"
 #include "mqa/watermark.h"
 
-/* The most output samples per channel one group can produce. */
+/* The most output samples per channel one group can produce, before
+ * rendering; rendering multiplies it by the ratio. */
 #define MQA_STREAM_DECODER_GROUP_MAX (MQA_RING_WORDS + 2 * MQA_GROUP + 64)
+#define MQA_STREAM_DECODER_OUT_MAX (MQA_RENDER_MAX_RATIO * MQA_STREAM_DECODER_GROUP_MAX)
 
 struct mqa_stream_decoder {
 	struct mqa_decoder dec;
@@ -48,6 +52,12 @@ struct mqa_stream_decoder {
 	int signalling;
 	struct mqa_watermark watermark;
 
+	/* The second unfold (render.h): off unless the owner asks for it.
+	 * With it on, run() writes `render_ratio` frames per decoded frame
+	 * and the stream's parameters go to the renderer directly. */
+	unsigned render_ratio;            /* 1: off; 2 or 4                    */
+	struct mqa_render render;
+
 	/* optional hooks around each group, for tools that look inside:
 	 * before it runs, and after it with the output samples (24-bit) */
 	void (*before_group)(void *user, struct mqa_stream_decoder *sd);
@@ -60,13 +70,22 @@ void mqa_stream_decoder_init(struct mqa_stream_decoder *sd, unsigned rate_hz);
 /* Embed the renderer signalling in the output (off by default). */
 void mqa_stream_decoder_set_signalling(struct mqa_stream_decoder *sd, int on);
 
+/*
+ * Render as well: output at `ratio` (2 or 4; 1 turns it off) times the
+ * unfolded rate. With `requantise` the output is also requantised to the
+ * stream's render bit depth, as a renderer's would be. Call before the
+ * first run().
+ */
+void mqa_stream_decoder_set_render(struct mqa_stream_decoder *sd, unsigned ratio, int requantise);
+
 /* Append frames to the carrier rings; returns how many were taken. */
 size_t mqa_stream_decoder_feed(struct mqa_stream_decoder *sd, const int32_t *lr, size_t n);
 
 /*
  * Decode as many groups as the rings allow, writing interleaved output
  * frames (at most `capacity`); returns the frames written. `capacity`
- * must be at least MQA_STREAM_DECODER_GROUP_MAX or no group can run.
+ * must be at least MQA_STREAM_DECODER_GROUP_MAX, times the render ratio
+ * when rendering, or no group can run.
  */
 size_t mqa_stream_decoder_run(struct mqa_stream_decoder *sd, int32_t *out, size_t capacity);
 

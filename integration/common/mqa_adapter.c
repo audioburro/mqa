@@ -110,8 +110,8 @@ static void queue_apply_policy(struct mqa_adapter *a)
  */
 static void drain_decoder(struct mqa_adapter *a)
 {
-	static const size_t one_group = MQA_STREAM_DECODER_GROUP_MAX;
-	int32_t staging[2 * MQA_STREAM_DECODER_GROUP_MAX];
+	const size_t one_group = a->sd.render_ratio * MQA_STREAM_DECODER_GROUP_MAX;
+	int32_t staging[2 * MQA_STREAM_DECODER_OUT_MAX];
 
 	for (;;) {
 		unsigned long before = a->sd.dec.passed;
@@ -138,6 +138,66 @@ static int stream_found(const struct mqa_adapter *a)
 	return a->sd.in.bs.xbit >= 0;
 }
 
+/* --- the second unfold --------------------------------------------------- */
+
+/* The ratio that reaches the stream's original rate, from its datasync. */
+static unsigned ratio_to_original(const struct mqa_adapter *a)
+{
+	unsigned code = a->sd.in.orig_rate & 31, orig_hz = 0;
+
+	if (code <= 23)
+		orig_hz = (unsigned)mqa_rate_code_base[code >> 3] << (code & 7);
+	if (orig_hz >= 8 * a->rate_hz)
+		return 4;
+	return orig_hz >= 4 * a->rate_hz ? 2 : 1;
+}
+
+/*
+ * Rendering starts with the stream: what the queue holds was produced
+ * before, at the doubled rate, so it goes through the renderer now, with
+ * the stream's filter if the decoder already has a stream (the frames
+ * just ahead of its first decoded group), and the decoder renders from
+ * here on. That is what the stream decoder does with the same frames.
+ */
+static void start_render(struct mqa_adapter *a)
+{
+	unsigned ratio = a->render == MQA_ADAPTER_RENDER_ORIGINAL ? ratio_to_original(a) : a->render;
+	size_t held = a->tail - a->head, done = 0;
+	int32_t *frames;
+
+	a->render_ratio = ratio;
+	if (ratio < 2)
+		return;
+	mqa_stream_decoder_set_render(&a->sd, ratio, a->requantise);
+	mqa_render_set_stream(&a->sd.render, a->sd.in.active, a->sd.in.render_filter);
+	if (held == 0)
+		return;
+	frames = malloc(2 * held * sizeof *frames);
+	if (!frames) {
+		a->failed = 1;
+		return;
+	}
+	memcpy(frames, a->queue + 2 * a->head, 2 * held * sizeof *frames);
+	a->tail = a->head;
+	while (done < held) {
+		int32_t l[256], r[256], ol[4 * 256], orr[4 * 256], out[2 * 4 * 256];
+		size_t n = held - done < 256 ? held - done : 256, i;
+
+		for (i = 0; i < n; i++) {
+			l[i] = frames[2 * (done + i)] >> 8;
+			r[i] = frames[2 * (done + i) + 1] >> 8;
+		}
+		mqa_render_run(&a->sd.render, l, r, n, ol, orr);
+		for (i = 0; i < n * ratio; i++) {
+			out[2 * i] = (int32_t)((uint32_t)ol[i] << 8);
+			out[2 * i + 1] = (int32_t)((uint32_t)orr[i] << 8);
+		}
+		queue_write(a, out, n * ratio);
+		done += n;
+	}
+	free(frames);
+}
+
 static void decide(struct mqa_adapter *a)
 {
 	if (a->state != MQA_ADAPTER_SNIFFING)
@@ -145,6 +205,8 @@ static void decide(struct mqa_adapter *a)
 	if (stream_found(a)) {
 		a->state = MQA_ADAPTER_DECODING;
 		queue_apply_policy(a);
+		if (a->render)
+			start_render(a);
 	} else if (a->fed >= a->sniff_frames) {
 		a->state = MQA_ADAPTER_PLAIN;
 	}
@@ -158,6 +220,7 @@ int mqa_adapter_init(struct mqa_adapter *a, unsigned rate_hz, unsigned sniff_fra
 	a->rate_hz = rate_hz;
 	a->sniff_frames = sniff_frames ? sniff_frames : rate_hz * DEFAULT_SNIFF_SECONDS;
 	a->policy = MQA_ADAPTER_HOLD;
+	a->render_ratio = 1;
 	mqa_stream_decoder_init(&a->sd, rate_hz);
 	return 0;
 }
@@ -173,7 +236,8 @@ void mqa_adapter_reset(struct mqa_adapter *a)
 {
 	unsigned rate = a->rate_hz, sniff = a->sniff_frames;
 	enum mqa_adapter_passthrough policy = a->policy;
-	int signalling = a->sd.signalling;
+	int signalling = a->sd.signalling, requantise = a->requantise;
+	unsigned render = a->render;
 	int32_t *queue = a->queue;
 	size_t cap = a->cap;
 
@@ -181,11 +245,20 @@ void mqa_adapter_reset(struct mqa_adapter *a)
 	a->rate_hz = rate;
 	a->sniff_frames = sniff;
 	a->policy = policy;
+	a->render = render;
+	a->render_ratio = 1;
+	a->requantise = requantise;
 	a->queue = queue;
 	a->cap = cap;
 	mqa_stream_decoder_init(&a->sd, rate);
 	if (signalling)
 		mqa_stream_decoder_set_signalling(&a->sd, 1);
+}
+
+void mqa_adapter_set_render(struct mqa_adapter *a, unsigned ratio, int requantise)
+{
+	a->render = ratio == 2 || ratio == 4 || ratio == MQA_ADAPTER_RENDER_ORIGINAL ? ratio : 0;
+	a->requantise = requantise;
 }
 
 void mqa_adapter_set_signalling(struct mqa_adapter *a, int on)
@@ -257,8 +330,11 @@ void mqa_adapter_force(struct mqa_adapter *a, enum mqa_adapter_state state)
 	if (a->state == state)
 		return;
 	a->state = state;
-	if (state == MQA_ADAPTER_DECODING)
+	if (state == MQA_ADAPTER_DECODING) {
 		queue_apply_policy(a);
+		if (a->render)
+			start_render(a);
+	}
 }
 
 enum mqa_adapter_state mqa_adapter_state(const struct mqa_adapter *a)
@@ -268,7 +344,7 @@ enum mqa_adapter_state mqa_adapter_state(const struct mqa_adapter *a)
 
 unsigned mqa_adapter_output_rate(const struct mqa_adapter *a)
 {
-	return a->state == MQA_ADAPTER_DECODING ? a->rate_hz * 2 : a->rate_hz;
+	return a->state == MQA_ADAPTER_DECODING ? a->rate_hz * 2 * a->render_ratio : a->rate_hz;
 }
 
 unsigned mqa_adapter_latency_frames(const struct mqa_adapter *a)

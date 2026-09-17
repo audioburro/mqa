@@ -86,6 +86,7 @@ build/mqad stats -f DIR...              # summarise them (-f reads whole files)
 build/mqad info  [-v] [-m md.bin] FILE  # the stream and its packets; -m saves embedded metadata
 build/mqad decode [-p] [-v] IN OUT      # decode; -p progress, -v formats
 build/mqad decode -s IN OUT             # ... with the renderer signalling embedded
+build/mqad decode -u 2 [-R] IN OUT      # both unfolds: render to the original rate
 build/mqad decode -r layer.wav -x extra.wav IN OUT   # research outputs
 ```
 
@@ -95,6 +96,15 @@ message for the renderer in a DAC: identifier, rates, render filter and depth,
 and one record per renderer profile, each with a CRC. To anything else it is
 dither at about -138 dBFS, so it is off by default. With `-s` the output
 matches the official decoder exactly.
+
+The second unfold. `-u 2` renders as well, to the rate the stream
+names as its original (2 or 4 times the unfolded rate), with the short
+filter the stream chose. It recovers nothing: a renderer is an
+interpolator whose filter the encoder picked, followed by a
+requantiser to a coarser step with noise shaping. The requantiser only
+loses precision, so it is off unless `-R` asks for it, and with it the
+output is what an MQA renderer produces, sample for sample. A third
+"unfold", in a DAC, is that DAC's own business.
 
 Research outputs. `-r` writes the residual layer (P, Q) as carried,
 one value per carrier sample. `-x` writes what the hidden data adds: the
@@ -134,9 +144,4 @@ may scale them before the unfold.
 4. The LSB correction's refresh. The +-1 correction is verified, but
    the source of its second priming segment is characterised, not
    verified.
-5. Joining a stream part way through. Not supported: the intake
-   counts frames from zero rather than from the position a resync
-   datasync announces, and the resync points the encoder was taught to
-   write do not decode correctly either, on the official decoder or
-   this one. The encoder README records what was learned.
 

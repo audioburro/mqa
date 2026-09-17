@@ -165,7 +165,7 @@ static int Open(vlc_object_t *obj)
 {
 	filter_t *filter = (filter_t *)obj;
 	struct filter_sys_t *sys;
-	unsigned rate = filter->fmt_in.audio.i_rate;
+	unsigned rate = filter->fmt_in.audio.i_rate, ratio = 1;
 
 	if ((filter->fmt_in.audio.i_format != VLC_CODEC_S32N &&
 	     filter->fmt_in.audio.i_format != VLC_CODEC_FL32) ||
@@ -182,6 +182,13 @@ static int Open(vlc_object_t *obj)
 	}
 	mqa_adapter_set_signalling(&sys->adapter,
 				   var_InheritBool(filter, MQA_CFG_PREFIX "signalling"));
+	/* the second unfold: a filter must name its rate now, so the ratio
+	 * is an option rather than the stream's original rate */
+	if (var_InheritInteger(filter, MQA_CFG_PREFIX "unfolds") == 2) {
+		ratio = var_InheritInteger(filter, MQA_CFG_PREFIX "render-ratio") == 4 ? 4 : 2;
+		mqa_adapter_set_render(&sys->adapter, ratio,
+				       var_InheritBool(filter, MQA_CFG_PREFIX "requantise"));
+	}
 
 	/*
 	 * The output rate is not known until the carrier is sniffed, and a
@@ -193,14 +200,15 @@ static int Open(vlc_object_t *obj)
 	 */
 	sys->floating = filter->fmt_in.audio.i_format == VLC_CODEC_FL32;
 	filter->fmt_out.audio = filter->fmt_in.audio;
-	filter->fmt_out.audio.i_rate = rate * 2;
+	filter->fmt_out.audio.i_rate = rate * 2 * ratio;
 
-	date_Init(&sys->date, rate * 2, 1);
+	date_Init(&sys->date, rate * 2 * ratio, 1);
 	date_Set(&sys->date, VLC_TICK_INVALID);
 	filter->p_sys = sys;
 	filter->pf_audio_filter = Filter;
 	filter->pf_flush = Flush;
-	msg_Dbg(filter, "MQA first unfold: %u Hz in, %u Hz out", rate, rate * 2);
+	msg_Dbg(filter, "MQA %s unfold: %u Hz in, %u Hz out", ratio > 1 ? "second" : "first",
+		rate, rate * 2 * ratio);
 	return VLC_SUCCESS;
 }
 
@@ -225,5 +233,11 @@ vlc_module_begin()
 	set_capability("audio filter", 0)
 	add_bool(MQA_CFG_PREFIX "signalling", false, "Renderer signalling",
 		 "Embed the signalling an MQA renderer downstream looks for", false)
+	add_integer(MQA_CFG_PREFIX "unfolds", 1, "Unfolds",
+		    "1: the first unfold only; 2: the second as well", false)
+	add_integer(MQA_CFG_PREFIX "render-ratio", 2, "Render ratio",
+		    "The second unfold's ratio on top of the doubling: 2 or 4", false)
+	add_bool(MQA_CFG_PREFIX "requantise", false, "Requantise",
+		 "With two unfolds, requantise the output as an MQA renderer does", false)
 	set_callbacks(Open, Close)
 vlc_module_end()

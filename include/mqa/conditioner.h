@@ -108,6 +108,14 @@ int32_t mqa_conditioner_gain(uint32_t level);
 /* The 8.8 gain of a datasync gain index (16 steps of 1/32 octave), before the shift. */
 uint32_t mqa_conditioner_gain_index(unsigned index);
 
+/*
+ * Continue from an arbitrary stream position, as a stream joined at a
+ * resync does: both stages count from `position`, and their noise
+ * generators are seeded for its 4096-sample block and advanced to the
+ * sample within it.
+ */
+void mqa_conditioner_seek(struct mqa_conditioner *c, uint32_t position);
+
 /* The reference's helper for the level record's feedback strength. */
 uint32_t mqa_conditioner_lag_strength(uint32_t v);
 

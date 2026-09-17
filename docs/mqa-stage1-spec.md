@@ -32,16 +32,14 @@ the audio's noise floor it also carries a coded representation of the
 signal's upper octave. A stage-1 decoder recovers that octave and emits
 PCM at twice the input rate: 88.2 or 96 kHz.
 
-This document specifies the stage-1 decode and nothing else. In
-particular it does **not** specify:
+This document specifies the stage-1 decode, and (section 13) the
+renderer's second unfold, which follows from it. It does **not**
+specify:
 
 * The encoder. What a compliant encoder must produce follows from this
   document, but the choices an encoder makes (filter design, bit
-  allocation, where to place packets) are not described.
-* The renderer, the second, DAC-side stage that oversamples further
-  and applies the filter the stream names. Section 11 specifies the
-  signalling a stage-1 decoder embeds for it, not what the renderer does
-  with it.
+  allocation, where to place packets) are not described;
+* what a DAC adds after the second unfold, sometimes sold as a third;
 * Authentication. Section 12 describes the fields and the observed
   behaviour, but the hashing behind them was not recovered.
 
@@ -256,6 +254,40 @@ it, or that takes digits from the wrong window, diverges within a few
 groups and stays wrong.
 
 *(Reference: `mqa/decoder.h`, `mqa/intake.h`.)*
+
+### 3.1 Joining a stream at a resync
+
+A file cut from the middle of a stream begins with a resync datasync
+(section 4.4) rather than an opening one, and a decoder joins the
+stream there. The reference does the following, and a decoder MUST do
+the same to reproduce it:
+
+* the stream position is taken from the datasync's declared position,
+  not counted from zero. The packet's own bit position is rebased the
+  same way (section 4.2);
+* the first group does not start at the datasync. The frames from it up
+  to the next multiple of 32 of the stream position pass through
+  unchanged (a record with `count` 32 minus the position modulo 32 and
+  no packet), and the stream starts fresh at that boundary. The control
+  channel is still read over those frames;
+* the conditioner (section 10) is set up from the datasync's item 0 as
+  it would be from an opening datasync, and both its stages count from
+  the joined position: their noise generators are seeded for the
+  4096-sample block the position falls in and advanced to the sample
+  within it, and stage 2 is not yet steady (it embeds no control bits
+  and codes nothing near full scale) until the marker at the announced
+  resync point is written;
+* the reconstruction packets' payload bits are appended to the ring the
+  conditioner re-embeds from as soon as they are extracted, before as
+  well as after the first sync is announced;
+* the block of 65536 frames the stream joined part way through
+  authenticates nothing when it ends: the authentication window is not
+  renewed there.
+
+The residual stage joins the data channel later, when the position the
+datasync names as consumed comes within the group being decoded
+(`mqa/decoder.h`: the packet start).
+
 
 ## 4. The control bitstream
 
@@ -1305,7 +1337,12 @@ The alternative kernel needs three things the short filter does not:
 
 * **Skip.** The first **eight** taps of every group are pushed through
   the same way (no output, sign not advanced), so a group of 32
-  carrier samples produces 48 output samples per channel, not 64.
+  carrier samples produces 48 output samples per channel, not 64. At a
+  stream's very start, when the output position is zero, the second
+  output and residue histories are cleared as the skip ends, so the
+  first tap that produces output sees the carrier history alone; a
+  stream joined part way through (section 3.1) keeps what the skip
+  left.
 
 * **Flush.** At the end of a stream the eight carrier samples that follow
   the group are pushed through as a full tap each, with zero residual and
@@ -1545,6 +1582,103 @@ reference's own checks do on authentic material, and derives the
 indicator from the datasync. On a stream that failed authentication the
 reference would report a lower indicator; this library would not notice.
 
+
+## 13. The second unfold (normative)
+
+*(Reference: `mqa/render.h`.)*
+
+An MQA renderer takes the stage-1 output and interpolates it by 2 or 4
+with a short polyphase filter the stream chose. Nothing is decoded: the
+renderer carries no data of its own, and its output is the stage-1
+output filtered, dithered and, in a renderer, requantised. A stage-1
+decoder that also renders needs only the datasync's render filter
+index, which it already has; the signalling of section 11 exists so
+that a renderer with nothing but PCM can learn the same thing.
+
+### 13.1 The interpolator
+
+The renderer keeps the most recent input frames as a history, newest
+first, and for each input frame produces `L` output frames, `L` being 2
+or 4. Output frame `p` of the `L` is
+
+```
+    acc[ch] = sum over k of row[p][k] * hist[k][ch]      (64-bit)
+    out[ch] = (acc[ch] + dither[ch]) >> 24               (arithmetic)
+```
+
+where `row[p]` is the `p`th row of the filter's coefficient table
+(section A.9 gives the tables; the rows are `taps` values each, Q24)
+and `hist[0]` is the frame just pushed. The filter is the stream's when
+one is in force: for a 2x ratio, entry `render_filter & 15` of the
+sixteen 2:1 records; for 4x, of the sixteen 4:1 records. Frames that
+belong to no stream use the generic record for the ratio. The history
+is kept across a change of filter.
+
+### 13.2 The dither
+
+Two generators run, stepped once per *output* frame, both starting at
+1: a 24-bit register clocked with a zero byte through the CRC-24 table
+of section A.9 (`A = table[A & 0xff] ^ (A >> 8)`), and the Numerical
+Recipes LCG of section A.5 (`B = B * 1664525 + 1013904223`). With
+`d = (int32) B >> 8` (arithmetic), the left channel's dither is `A + d`
+and the right's `A - d`, using the values before the step. The sum is
+uniform over a 24-bit unit plus a triangular part of one unit, so the
+rounding error of the shift is dithered at one step of the 24-bit
+output.
+
+### 13.3 The requantiser
+
+A renderer then requantises a stream's output to a coarser step, with
+noise shaping. The step is 2^8 at 2x and 2^10 at 4x. The datasync's
+render bit depth index did not change the step on any stream tried
+(indices 1 and 2 were seen); an implementation SHOULD treat the step as
+a property of the ratio.
+
+The shaper keeps a ring of sixteen pairs, each pair one value per
+channel, and a second pair of the generators of 13.2, both seeded
+`0x2346` when a stream comes into force, at which point the ring is
+cleared. For each output frame, with `s` the step's shift, `taps` and
+`errors` from the table below and `row` the shaper's taps (Q24):
+
+```
+    acc[ch]  = sum over k < taps of row[k] * ring[(head + k) & 15][ch]   (64-bit)
+    t[ch]    = (int32)(acc[ch] >> 32) << 8                               (32-bit wrap)
+    d        = (int32) B >> 8
+    dither   = A + d (left), A - d (right)
+    P[ch]    = dither + t[ch]                                            (32-bit wrap)
+    S[ch]    = ((int64) P[ch] << 8) + ((int64) x[ch] << (32 - s))
+    y[ch]    = (int32)(S[ch] >> 32) << s                                 the output
+    e[ch]    = dither - ((uint32) S[ch] >> 8)                            (32-bit wrap)
+    head     = (head - 1) & 15
+    ring[head]                 = e
+    ring[(head + errors) & 15] = t
+    step A and B
+```
+
+`x` is the interpolator's output, `y` replaces it. The ring holds the
+last `errors` error pairs from `head` on, followed by the shaper's own
+last outputs; at 2x the row reaches only the errors, at 4x its last two
+taps apply to the outputs.
+
+| Ratio | `s` | `taps` | `errors` | `row` (Q24) |
+| --- | --- | --- | --- | --- |
+| 2 | 8 | 5 | 5 | -47138474, 62756143, -47154415, 19670274, -3604311 |
+| 4 | 10 | 8 | 6 | -35998940, 37275625, -13408452, -3191330, 685015, 759498, 10294885, -7743830 |
+
+The requantiser only loses precision, so a decoder that renders for its
+own output MAY leave it out; one that wants a renderer's exact output
+MUST apply it.
+
+### 13.4 Verification
+
+The whole of this section reproduces a renderer bit for bit: on plain
+PCM (the generic filters, no requantisation) and on a stream's output
+(its filter, then the requantiser), at 2x and 4x, for streams in both
+rate families. Test vectors are in `render.txt` (Appendix B). What a
+renderer does before it has read the signalling (it interpolates with
+the generic filter and requantises with a step of 2^4) is an artefact of
+learning the parameters from the samples, and a decoder that renders
+does not reproduce it.
 
 ## Appendix A: constants
 
@@ -1833,6 +1967,7 @@ The inputs are synthetic patterns, so the files carry no audio.
 | `reconstruct.txt` | eight taps of the short filter | 8.2 |
 | `recon2.txt` | a 16-pair warm-up and 24 taps of the alternative kernel | 8.3, 8.4 |
 | `signalling.txt` | 64 frames of renderer signalling and the message bytes | 11 |
+| `render.txt` | 48 frames rendered by 2 and by 4, plain and as a stream's output | 13 |
 
 ## Appendix C: differences from the reference decoder
 

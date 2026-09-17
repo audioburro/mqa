@@ -443,6 +443,9 @@ int mqa_decoder_group(struct mqa_decoder *d, const struct mqa_packet *pkt)
 		 * its contents (a realignment, below, is the case that hands it
 		 * real ones) */
 		memset(digits, 0, sizeof digits);
+		if (with_digits && mqa_carrier_classes[pkt->cls].levels > 1)
+			mqa_carrier_digits(d->ring_a + d->pos, d->ring_b + d->pos, MQA_GROUP / 2, pkt->shift,
+					   &mqa_carrier_classes[pkt->cls], digits);
 		d->resync_mode = with_digits ? 1 : 0;
 		d->parser.type = -1;          /* no message in progress */
 		d->parser.rings_enabled = 0;

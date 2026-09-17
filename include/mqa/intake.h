@@ -18,7 +18,8 @@
  *     refills the cleared byte with shaped dither and re-embeds the
  *     control bits, and checksums the result;
  *   * it keeps the stream position, the group's frame count and the
- *     flags the decoder reads.
+ *     flags the decoder reads. A stream joined at a resync datasync
+ *     counts from the position the datasync announces (section 3.1).
  *
  * Sections 3, 4 and 12 of docs/mqa-stage1-spec.md cover the timing, the
  * packets and what is known of authentication. The authentication
@@ -76,6 +77,8 @@ struct mqa_intake {
 	int ds_flag;                      /* low bit of the datasync's last field */
 	uint32_t first_sync;              /* this group announced the first sync */
 	int rate_changed;                 /* a datasync announced another rate */
+	int joined;                       /* the stream was joined at a resync */
+	uint32_t joined_at;               /* the position it was joined at */
 
 	/* datasync fields, kept as the datasync gives them */
 	uint32_t ds_word[16];             /* the item words */

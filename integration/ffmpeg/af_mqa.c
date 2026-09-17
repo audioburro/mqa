@@ -37,6 +37,9 @@ typedef struct MQAContext {
     struct mqa_adapter adapter;
     int started;
     int signalling;
+    int unfolds;
+    int ratio;
+    int requantise;
     int eof;
     int64_t next_pts;
 } MQAContext;
@@ -47,6 +50,12 @@ typedef struct MQAContext {
 static const AVOption mqa_options[] = {
     { "signalling", "embed the signalling an MQA renderer looks for",
       OFFSET(signalling), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+    { "unfolds", "1: the first unfold only; 2: the second as well",
+      OFFSET(unfolds), AV_OPT_TYPE_INT, { .i64 = 1 }, 1, 2, FLAGS },
+    { "ratio", "the second unfold's ratio on top of the doubling: 2 or 4",
+      OFFSET(ratio), AV_OPT_TYPE_INT, { .i64 = 2 }, 2, 4, FLAGS },
+    { "requantise", "with two unfolds, requantise the output as an MQA renderer does",
+      OFFSET(requantise), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
     { NULL }
 };
 
@@ -63,7 +72,7 @@ static int query_formats(const AVFilterContext *ctx,
         AV_CHANNEL_LAYOUT_STEREO, { .nb_channels = 0 }
     };
     static const int in_rates[] = { 44100, 48000, -1 };
-    static const int out_rates[] = { 88200, 96000, -1 };
+    static const int out_rates[] = { 88200, 96000, 176400, 192000, 352800, 384000, -1 };
     int ret;
 
     if ((ret = ff_set_common_formats_from_list2(ctx, cfg_in, cfg_out, formats)) < 0)
@@ -73,10 +82,11 @@ static int query_formats(const AVFilterContext *ctx,
     if ((ret = ff_formats_ref(ff_make_format_list(in_rates), &cfg_in[0]->samplerates)) < 0)
         return ret;
     /*
-     * The output rate is twice the input's, but a filter cannot say that
-     * directly: it offers both doubled rates and lets negotiation pair
-     * them, which it does by preferring the output nearest the input.
-     * config_output then insists on the pairing being the right one.
+     * The output rate is twice the input's (times the render ratio with
+     * two unfolds), but a filter cannot say that directly: it offers the
+     * possible rates and lets negotiation pair them, which it does by
+     * preferring the output nearest the input. config_output then
+     * insists on the pairing being the right one.
      */
     return ff_formats_ref(ff_make_format_list(out_rates), &cfg_out[0]->samplerates);
 }
@@ -86,11 +96,12 @@ static int config_output(AVFilterLink *outlink)
     AVFilterContext *ctx = outlink->src;
     AVFilterLink *inlink = ctx->inputs[0];
     MQAContext *s = ctx->priv;
+    int ratio = s->unfolds == 2 ? s->ratio : 1;
 
-    if (outlink->sample_rate != inlink->sample_rate * 2) {
+    if (outlink->sample_rate != inlink->sample_rate * 2 * ratio) {
         av_log(ctx, AV_LOG_ERROR,
-               "the unfold doubles the rate: %d Hz in wants %d Hz out, not %d\n",
-               inlink->sample_rate, inlink->sample_rate * 2, outlink->sample_rate);
+               "the unfold multiplies the rate by %d: %d Hz in wants %d Hz out, not %d\n",
+               2 * ratio, inlink->sample_rate, inlink->sample_rate * 2 * ratio, outlink->sample_rate);
         return AVERROR(EINVAL);
     }
     outlink->time_base = (AVRational){ 1, outlink->sample_rate };
@@ -98,7 +109,9 @@ static int config_output(AVFilterLink *outlink)
     if (mqa_adapter_init(&s->adapter, inlink->sample_rate, 0) < 0)
         return AVERROR(ENOMEM);
     mqa_adapter_set_signalling(&s->adapter, s->signalling);
-    /* the graph is committed to the doubled rate already */
+    if (ratio > 1)
+        mqa_adapter_set_render(&s->adapter, (unsigned)ratio, s->requantise);
+    /* the graph is committed to the output rate already */
     mqa_adapter_force(&s->adapter, MQA_ADAPTER_DECODING);
     s->started = 1;
     return 0;
