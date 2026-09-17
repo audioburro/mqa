@@ -42,8 +42,8 @@ the specification is also the encoder's feature list:
 | --- | --- | --- |
 | carrier rate | datasync `src_rate` | 44.1 or 48 kHz |
 | original rate | datasync `orig_rate` | any rate code, e.g. 352.8 kHz |
-| render filter | datasync, 5 bits | 0..31 -- what the DAC-side renderer applies |
-| render bit depth | datasync, 2 bits | 0..3 |
+| render filter | datasync, 5 bits | 0..31: which of sixteen interpolators the second unfold applies (`mqad decode -u 2`) |
+| render bit depth | datasync, 2 bits | 0..3; a renderer's requantiser did not follow it on any stream tried |
 | provenance | datasync `auth_level`/`auth_info`, type-4 packets | 9 = studio |
 | carrier class | datasync item 1 | 0..3: where the residual data travels |
 | reconstruction kernel | datasync item 1 `variant` | 1 = short filter, 0 = the long kernel |
@@ -195,11 +195,12 @@ Three things were learned.
   fields, but it does so while acting on item 0, when it has copied only
   the bits up to the end of that item. The marker carries its position
   and nothing else.
-* A decoder joining part way through has to count from the position the
-  datasync announces, not from zero. The control channel already does
-  this (it rebases its checksum seeds from the same field); the intake
-  does not, and needs changing before any of this can be tested end to
-  end.
+* A decoder joining part way through counts from the position the
+  datasync announces, not from zero, and starts its first group at the
+  next multiple of 32 of that count. The library's intake now does this
+  (spec section 3.1), which is what a file cut from a real stream
+  needs; whether the encoder's own resync points would then join has
+  not been retried.
 * A resync point needs a reconstruction packet behind it or nothing can
   join there: a decoder will not start a stream until it has met one.
 
