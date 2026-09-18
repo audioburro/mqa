@@ -120,7 +120,10 @@ carrier in ten seconds; decoded back, it is 66.6 dB from the source,
 with the error shaped away from where the music is.
 
 It cannot authenticate a stream; that needs keys nobody outside MQA
-has. Everything else in the format is there. See `encoder/README.md`.
+has, and an MQA decoder ends an unsigned stream at its first
+65536-frame block, so what it writes plays for 1.4 seconds in one and
+in full in this library. Everything else in the format is there,
+resync points included, so a player can seek. See `encoder/README.md`.
 
 ## Players
 
@@ -136,9 +139,13 @@ may scale them before the unfold.
    output path in the official decoder that can reconfigure a polyphase
    resampler. The rate-status machine is implemented; the resampling is
    not. No file to hand exercises it.
-2. Authentication. The hashing of the 384-byte authentication
-   packets was not recovered. The library treats every block as
-   authenticating and derives the indicator from the datasync.
+2. Authentication. The library does not verify: it treats every
+   block as authenticating and derives the indicator from the datasync.
+   The vendor decoder verifies, and ends a stream whose 65536-frame
+   block has no verified packet to match. The outline of the scheme is
+   public (RSA-3072 signatures under published public keys, hashes of
+   the audio), so verifying, for the indicator's sake, is possible
+   future work; the hashing of the audio was not recovered.
 3. The alignment mode (mode 1) a packet start can leave the decoder
    in. The library reports `MQA_DECODER_UNSUPPORTED`.
 4. The LSB correction's refresh. The +-1 correction is verified, but

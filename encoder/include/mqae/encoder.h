@@ -44,6 +44,16 @@ struct mqae_config {
 	unsigned variant;          /* 1: the short filter, 0: the long kernel  */
 	unsigned salt_select;      /* dither salt: 0 silence, 1 or 2           */
 
+	/*
+	 * Blocks of 4096 frames between resync points, 0 for none. A stream
+	 * can only be joined where a resync datasync is, so this is how
+	 * finely a player can seek. The points fall one block into each run
+	 * (blocks 1, 1 + N, 1 + 2N, ...); the default of 16 puts one a block
+	 * after every 65536-frame authentication boundary, as real streams
+	 * do.
+	 */
+	unsigned resync_blocks;
+
 	struct mqae_auth auth;     /* provenance, and the signer if there is one */
 };
 
@@ -92,6 +102,24 @@ void mqae_encoder_write(struct mqae_encoder *e, int32_t *lr, size_t n, int place
  * rounded, not patched in afterwards.
  */
 void mqae_encoder_reserve(struct mqae_encoder *e, uint64_t frames);
+
+/*
+ * A resync point at `boundary`, which must be a block boundary of the
+ * residual coder: the datasync a decoder can join the stream at goes
+ * into the control channel MQAE_RESYNC_LEAD frames before it, with the
+ * empty reconstruction packet a decoder waits for behind it. The
+ * datasync names a sync position MQAE_RESYNC_SYNC frames before the
+ * boundary, where a decoder's conditioner writes its marker (a caller
+ * modelling the decoder must give its own conditioner the same marker:
+ * a single zero word), and names the block's own first data-channel
+ * byte as where the residual stream is to be picked up.
+ *
+ * Returns the sync position, or 0 when no datasync was written: the
+ * control channel is already past the place, or the stream is ending.
+ */
+#define MQAE_RESYNC_LEAD 992
+#define MQAE_RESYNC_SYNC 512
+uint64_t mqae_encoder_resync(struct mqae_encoder *e, uint64_t boundary);
 
 /* Data-channel bytes still unwritten, how far ahead the caller may
  * append before the carrier catches up. */

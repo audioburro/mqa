@@ -1570,17 +1570,27 @@ What is known and reproducible:
 * authentication is evaluated over blocks of 65536 frames; a block that
   passes keeps the stream authenticated for a window of 327680 frames,
   and a decoder starts with a full window;
-* **authentication required for decoding.** Removing every authentication
-  packet from a stream still yields decodable audio: the reference
-  decoder restarts the stream once per missing packet, losing about 2% of
-  its output and dropping the "authored" status it reports, but the audio
-  that remains is bit-identical. A decoder that cannot authenticate can
+* at every 65536-frame boundary the reference hashes the block just
+  played and requires a verified authentication packet whose fields
+  match the datasync's; failing that it ends the stream (its indicator
+  goes to 0 and its window to 0);
+* **on a stream that carries authentication packets this is not a
+  decode gate.** Removing every packet from one still yields decodable
+  audio: the reference ends the stream once per missing packet and
+  joins it again at the next resync datasync, where the next packet
+  re-arms it, losing about 2% of its output and dropping the "authored"
+  status it reports, but the audio that remains is bit-identical;
+* **on a stream that carries no packets it is.** The stream is ended at
+  its first boundary and, with nothing to re-arm it, is not joined
+  again at any later resync point: the reference plays an unsigned
+  stream for 65536 frames. A decoder that cannot authenticate can
   therefore decode; it MUST NOT claim the stream is authenticated.
 
 This library takes every block as authenticating, which is what the
 reference's own checks do on authentic material, and derives the
 indicator from the datasync. On a stream that failed authentication the
-reference would report a lower indicator; this library would not notice.
+reference would report a lower indicator or end it; this library plays
+on and would not notice.
 
 
 ## 13. The second unfold (normative)

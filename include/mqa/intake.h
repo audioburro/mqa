@@ -42,7 +42,9 @@
  * the stream authenticated for this long, and the decoder starts out
  * with a full window. (The library does not hash: it takes the blocks
  * as passing, which is what the reference's own checks do on authentic
- * material. A stream that failed would show a lower indicator.)
+ * material. The reference ends a stream whose block has no verified
+ * packet to match, an unsigned stream at its first boundary; this
+ * library plays on. Spec section 12.)
  */
 #define MQA_INTAKE_AUTH_WINDOW  327680u
 #define MQA_INTAKE_AUTH_BLOCK   0x10000u

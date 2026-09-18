@@ -125,6 +125,18 @@ int main(int argc, char **argv)
 			printf("  %8lu  type %-2u %-10s header %u payload %-4u check %s",
 			       (unsigned long)off, type, msg_name(type), extra, payload,
 			       (reg & 0xf) == nibble ? "ok" : "BAD");
+			if (type == 3) {
+				unsigned b1 = chan[off + 1];
+
+				printf("  kind %u%s%s", (b1 >> 2) & 0xf,
+				       (b1 & 1) ? " id" : "", (b1 & 2) ? " word" : "");
+				if (b1 & 2) {
+					unsigned w = (b1 & 1) ? 4 : 2;
+
+					printf(" %02x%02x%02x%02x", chan[off + w + 3], chan[off + w + 2],
+					       chan[off + w + 1], chan[off + w]);
+				}
+			}
 			if (type == 4) {
 				uint32_t id = (uint32_t)chan[off + 1] | (uint32_t)chan[off + 2] << 8 |
 					      (uint32_t)chan[off + 3] << 16;

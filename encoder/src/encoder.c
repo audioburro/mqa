@@ -28,11 +28,26 @@ void mqae_config_default(struct mqae_config *cfg)
 	cfg->carrier_class = 0;
 	cfg->variant = 1;
 	cfg->salt_select = 1;
+	cfg->resync_blocks = 16;
 	mqae_auth_none(&cfg->auth);
 }
 
 /* The opening datasync: what the stream is, and how to decode it. */
-static void write_datasync(struct mqae_encoder *e)
+/*
+ * A datasync, and the reconstruction packet that has to follow one: a
+ * decoder will not start a stream until it has met one of those, the
+ * packets that carry what a renderer downstream needs. This encoder has
+ * nothing to put in one, so it writes an empty one, which says there is
+ * no reconstruction data.
+ *
+ * With `at` set this is a resync datasync: it announces its own
+ * position, the sync position `at` and the data-channel byte `consumed`
+ * from which a joining decoder reads the residual stream. The sync mode
+ * is what real streams carry; a decoder takes its actual read position
+ * from the block's sync message, which the mode would otherwise stand
+ * in for.
+ */
+static void write_datasync(struct mqae_encoder *e, uint32_t at, uint32_t consumed)
 {
 	struct mqae_datasync ds;
 	const struct mqae_config *c = &e->cfg;
@@ -55,7 +70,18 @@ static void write_datasync(struct mqae_encoder *e)
 	ds.item[1].u.params.carrier_class = c->carrier_class;
 	ds.item[1].u.params.variant = c->variant;
 	ds.item[1].u.params.salt_select = c->salt_select;
+	if (at) {
+		ds.with_position = 1;
+		ds.position = (uint32_t)e->bits.nbits;
+		ds.item[0].u.base.start_pos = at / 32;
+		ds.item[1].u.params.sync_mode = 255;
+		ds.item[1].u.params.flag = consumed & 1;
+		ds.item[1].u.params.offset = (int32_t)(consumed / 2) - (int32_t)at;
+	}
 	mqae_bits_datasync(&e->bits, &ds);
+	mqae_bits_packet(&e->bits, MQA_BS_RECONSTRUCTION);
+	mqae_bits_put(&e->bits, 0, 12);
+	mqae_bits_end(&e->bits);
 }
 
 int mqae_encoder_open(struct mqae_encoder *e, const struct mqae_config *cfg, uint64_t total)
@@ -69,17 +95,7 @@ int mqae_encoder_open(struct mqae_encoder *e, const struct mqae_config *cfg, uin
 		mqae_bits_free(&e->bits);
 		return -1;
 	}
-	write_datasync(e);
-	/*
-	 * A decoder will not start a stream until it has met a
-	 * reconstruction packet, the packets that carry what a renderer
-	 * downstream needs. This encoder has nothing to put in one, so it
-	 * writes an empty one, which says there is no reconstruction data.
-	 */
-	mqae_bits_packet(&e->bits, MQA_BS_RECONSTRUCTION);
-	mqae_bits_put(&e->bits, 0, 12);
-	mqae_bits_end(&e->bits);
-
+	write_datasync(e, 0, 0);
 	/* the data channel opens with the parameter record, from which a
 	 * decoder takes its scales and the two stages' initial state */
 	mqae_chan_record(&e->chan, e->cfg.scale_index, NULL, NULL);
@@ -126,6 +142,23 @@ static void ensure_bits(struct mqae_encoder *e, uint64_t n)
 void mqae_encoder_reserve(struct mqae_encoder *e, uint64_t frames)
 {
 	ensure_bits(e, frames);
+}
+
+uint64_t mqae_encoder_resync(struct mqae_encoder *e, uint64_t boundary)
+{
+	uint64_t place = boundary - MQAE_RESYNC_LEAD, at = boundary - MQAE_RESYNC_SYNC;
+
+	if (boundary < MQAE_RESYNC_LEAD || e->bits.nbits > place || e->terminated)
+		return 0;
+	/* no joining a stream that is about to end: the terminate packet
+	 * is due, and a decoder would not get a block out of it anyway */
+	if (e->total && boundary + MQAE_BITS_TERMINATE + TERMINATE_AHEAD + 4096 >= e->total)
+		return 0;
+	ensure_bits(e, place);
+	if (e->terminated || e->bits.failed)
+		return 0;
+	write_datasync(e, (uint32_t)at, (uint32_t)(2 * boundary));
+	return at;
 }
 
 void mqae_encoder_write(struct mqae_encoder *e, int32_t *lr, size_t n, int placed)

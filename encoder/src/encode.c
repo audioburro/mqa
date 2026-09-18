@@ -240,6 +240,25 @@ static void encode_block(struct mqae_encode *e, unsigned taps, int32_t *out)
 		e->taps += taps;
 		goto out;
 	}
+	/*
+	 * A resync point at the block boundary ahead: its datasync goes
+	 * into this block's frames, and the marker it announces goes into
+	 * the model's conditioner as it will into a decoder's. The points
+	 * fall one block into each run of `resync_blocks`, so that with the
+	 * default of 16 there is one a block after every 65536-frame
+	 * authentication boundary, which is where real streams put theirs.
+	 */
+	if (e->out.cfg.resync_blocks && taps == MQAE_ENCODE_BLOCK &&
+	    ((e->taps + taps) / MQAE_ENCODE_BLOCK) % e->out.cfg.resync_blocks ==
+	    1 % e->out.cfg.resync_blocks) {
+		uint64_t at = mqae_encoder_resync(&e->out, e->taps + taps);
+
+		if (at) {
+			uint32_t zero = 0;
+
+			mqa_conditioner_set_marker(&e->cond, (uint32_t)at, &zero, 1);
+		}
+	}
 	mqae_encoder_reserve(&e->out, e->taps + taps);
 	for (i = 0; i < taps; i++) {
 		double a = carrier[0][i] / e->model_gain, b = carrier[1][i] / e->model_gain;

@@ -50,7 +50,10 @@ static int usage(void)
 		"  --salt N         dither salt: 0 silence, 1, 2 (default 1)\n"
 		"  --filter N       render filter, 0..31 (default 8)\n"
 		"  --depth N        render bit depth, 0..3 (default 2)\n"
-		"  --auth N         authentication level the stream claims (default 0)\n");
+		"  --auth N         authentication level the stream claims (default 0)\n"
+		"  --resync N       a resync point every N blocks of 4096 frames, where a\n"
+		"                   player can join the stream (default 16: one a block\n"
+		"                   into each 65536-frame authentication block; 0 none)\n");
 	return 2;
 }
 
@@ -97,6 +100,7 @@ static int options(int argc, char **argv, struct mqae_config *cfg, unsigned *ori
 		OPT("--filter", cfg->render_filter)
 		OPT("--depth", cfg->render_bitdepth)
 		OPT("--auth", cfg->auth.level)
+		OPT("--resync", cfg->resync_blocks)
 #undef OPT
 		return usage();
 	}
@@ -251,7 +255,8 @@ static int encode(int argc, char **argv)
 		printf("  the encoder expects %.1f dB (rms error %.0f), left channel\n",
 		       10 * log10(e.out_energy / (e.out_error > 0 ? e.out_error : 1e-9)),
 		       sqrt(e.out_error / (2 * e.counted)));
-	printf("  unauthenticated: an MQA decoder will not show its indicator for it\n");
+	printf("  unauthenticated: an MQA decoder shows no indicator for it, and ends it\n"
+	       "  at its first 65536-frame block; this library's decoder plays it all\n");
 	rc = 0;
 done:
 	free(src);
@@ -319,7 +324,8 @@ static int wrap(int argc, char **argv)
 	       (unsigned long long)done, r.rate, cfg.orig_rate);
 	printf("  control channel %llu bits, data channel %llu bytes\n",
 	       (unsigned long long)e.bits.nbits, (unsigned long long)e.chan.len);
-	printf("  unauthenticated: an MQA decoder will not show its indicator for it\n");
+	printf("  unauthenticated: an MQA decoder shows no indicator for it, and ends it\n"
+	       "  at its first 65536-frame block; this library's decoder plays it all\n");
 	rc = 0;
 done:
 	mqae_encoder_close(&e);

@@ -54,7 +54,7 @@ the specification is also the encoder's feature list:
 | stage-2 dither mode | datasync item 0 | 2 bits |
 | channel bit | the carrier itself | one of bits 8..15 |
 | metadata | type-7 packets | fragmented, up to 256 bytes each |
-| resync cadence | datasyncs with positions | how often a joiner can start |
+| resync cadence | resync datasyncs (`--resync N`) | every N blocks of 4096 frames; default one per 65536 |
 
 Two of those are not free choices.
 
@@ -174,52 +174,60 @@ What is not invertible is where the loss is: the quantiser in the
 entropy coder, and the carrier, which has to be a listenable 44.1 kHz
 signal as well as a container.
 
-## Open: joining a stream part way through
+## Joining a stream part way through
 
 A stream is found only where a datasync is, so a player can only start
-at the beginning of what this encoder writes; seek into the middle and
-there is nothing to find. Real streams carry a resync datasync every few
-thousand frames, and writing them was tried.
+where the encoder put one. The opening datasync is one; the rest are
+resync points, and by default the encoder writes one a block after
+every 65536-frame authentication boundary, which is where real streams
+put theirs (`--resync N` puts one every N blocks; 0 writes none).
 
-It does not work yet. A decoder finds the packet, takes the stream's
-parameters from it and starts decoding, but what it decodes is wrong,
-and the vendor decoder produces the same wrong audio, so the fault is in
-the stream. What is not right is one of: the byte offset the datasync
-gives for the data channel (item 1's offset and the bit beside it), the
-sync mode in that item, or the conditioner's resync marker.
+A resync point is built around a block boundary of the residual coder,
+which restarts every 4096 frames, so that a joiner has somewhere to pick
+the residual stream up. 992 frames before the boundary the control
+channel carries a datasync that announces its own position (a joiner
+counts frames from it rather than from zero), names a sync position 512
+frames before the boundary, where the conditioner writes its resync
+marker, and names the data channel's first byte of the block, the sync
+message at its head, as where the residual stream is to be read from.
+An empty reconstruction packet follows, because a decoder will not start
+a stream without one. The encoder's model of the decoder writes the same
+marker, so a continuous decode is unaffected: `mqae verify` reports the
+same figures with the points as without.
 
-Three things were learned.
-
-* The marker words are **zeros**, whatever the packet holds. A decoder
-  reads them from the packet's own bits at an offset past item 0's
-  fields, but it does so while acting on item 0, when it has copied only
-  the bits up to the end of that item. The marker carries its position
-  and nothing else.
-* A decoder joining part way through counts from the position the
-  datasync announces, not from zero, and starts its first group at the
-  next multiple of 32 of that count. The library's intake now does this
-  (spec section 3.1), which is what a file cut from a real stream
-  needs; whether the encoder's own resync points would then join has
-  not been retried.
-* A resync point needs a reconstruction packet behind it or nothing can
-  join there: a decoder will not start a stream until it has met one.
-
-Two pieces from the attempt are kept, because real streams have them
-and they cost nothing: a sync message at the head of every block's data
-(the message that tells a decoder where to pick the residual stage up),
-and control-channel holes sized to end on a block boundary, so that a
-packet can be placed at a chosen frame.
-
-The way in is to watch a decoder join a real stream at one of its
-resync points and compare its state, group by group, with what it does
-on one of ours.
+A file cut at a resync point decodes. The library joins it, and so does
+the vendor decoder, sample for sample the same as the library (until
+the next authentication boundary; see below). The frames from the
+datasync to the block boundary come out without the residual layer,
+since the coder has nothing to decode yet; from the boundary on, the
+joined decode converges on the continuous one. It never becomes
+identical to it: the entropy decoders adapt a small predictor as they
+go, and nothing in the stream reseeds one that started late, so the two
+decodes differ by a residue some 60 to 75 dB below the signal for the
+rest of the file. That is well under the encoder's own error, and real
+streams have the same property. `tests/test_join.c` checks it.
 
 ## Provenance, and why this cannot authenticate
 
 The datasync says what a stream claims; type-4 packets carry the proof.
-Each is 384 bytes, the size of a 3072-bit signature, though the scheme
-was not recovered. A decoder that verifies one keeps the stream
-authenticated for 327680 frames.
+Each is 384 bytes, a 3072-bit RSA signature under one of sixteen public
+keys selected by the authentication level, which earlier reverse
+engineering published along with the layout of what it signs: hashes of
+the audio, one per 65536-frame block. The private keys are MQA's. A
+decoder that verifies a packet keeps the stream authenticated for
+327680 frames.
+
+That is a gate, not only an indicator. At every 65536-frame boundary
+the vendor decoder hashes the block it has just played and asks its
+authentication object for a verified packet whose fields match the
+datasync's. A stream that carries packets but lost one is ended at the
+boundary and joined again at the next resync point, where the next
+packet re-arms it. A stream that carries none fails at its first
+boundary, is ended, and is not joined again at any later resync point.
+So the vendor decoder plays what this encoder writes for exactly 65536
+frames, 1.4 seconds at 48 kHz, and nothing after; a decoder instance
+opened afresh at any resync point plays another 65536. This library's
+decoder takes every block as passing and plays all of it.
 
 `mqae/auth.h` writes those packets and hands their contents to a signer
 you supply, along with the block's carrier samples so it can hash
